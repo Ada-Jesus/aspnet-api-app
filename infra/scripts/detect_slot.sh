@@ -9,6 +9,16 @@
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ================= SAFETY CHECKS =================
+: "${ALB_LISTENER_ARN:?Missing ALB_LISTENER_ARN}"
+: "${BLUE_TG_ARN:?Missing BLUE_TG_ARN}"
+: "${GREEN_TG_ARN:?Missing GREEN_TG_ARN}"
+: "${BLUE_SERVICE:?Missing BLUE_SERVICE}"
+: "${GREEN_SERVICE:?Missing GREEN_SERVICE}"
+: "${AWS_REGION:?Missing AWS_REGION}"
+
+# ================= MAIN LOGIC =================
+
 echo "==> Querying ALB listener: ${ALB_LISTENER_ARN}"
 
 LIVE_TG=$(aws elbv2 describe-listeners \
