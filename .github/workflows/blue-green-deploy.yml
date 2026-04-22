@@ -1,0 +1,176 @@
+# ═══════════════════════════════════════════════════════════════════
+#  .github/workflows/blue-green-deploy.yml
+#  Zero-Downtime Blue/Green – ASP.NET Core 8 → ECR → ECS Fargate
+#  Shell scripts live in: infra/scripts/
+#  Terraform lives in:    infra/terraform/
+#
+# ── REQUIRED GITHUB SECRETS ─────────────────────────────────────
+#   AWS_ACCESS_KEY_ID
+#   AWS_SECRET_ACCESS_KEY
+#
+# ── REQUIRED GITHUB VARIABLES (Settings → Variables) ────────────
+#   AWS_REGION          e.g. us-east-1
+#   AWS_ACCOUNT_ID      e.g. 123456789012
+#   ECR_REPOSITORY      e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com/aspnet-api-production
+#   ECS_CLUSTER         e.g. aspnet-api-production
+#   BLUE_SERVICE        e.g. aspnet-api-production-blue
+#   GREEN_SERVICE       e.g. aspnet-api-production-green
+#   BLUE_TG_ARN         arn:aws:elasticloadbalancing:...
+#   GREEN_TG_ARN        arn:aws:elasticloadbalancing:...
+#   ALB_LISTENER_ARN    arn:aws:elasticloadbalancing:...
+#   TEST_LISTENER_ARN   arn:aws:elasticloadbalancing:...
+#   ALB_DNS_NAME        e.g. aspnet-api-production-alb-123.us-east-1.elb.amazonaws.com
+#   ALB_ARN_SUFFIX      e.g. app/aspnet-api-production-alb/abc123  (from terraform output)
+#   DESIRED_COUNT       e.g. 2
+# ═══════════════════════════════════════════════════════════════════
+name: 🚀 Blue/Green Deploy
+
+on:
+  push:
+    branches: [main]
+
+env:
+  IMAGE_TAG: ${{ github.run_number }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+
+permissions:
+  contents: read
+
+jobs:
+
+# ---------------- BUILD ----------------
+  build-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.x'
+
+    - run: dotnet restore
+    - run: dotnet build --no-restore -c Release
+    - run: dotnet test --no-build -c Release
+
+
+# ---------------- DOCKER ----------------
+  docker-push:
+    runs-on: ubuntu-latest
+    needs: build-test
+
+    outputs:
+      image-uri: ${{ steps.out.outputs.image-uri }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: AWS login
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: ECR login
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Build image
+      run: docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+
+    - name: Tag image
+      run: |
+        docker tag $ECR_REPOSITORY:$IMAGE_TAG \
+        $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Push image
+      run: |
+        docker push $ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG
+
+    - name: Output image URI
+      id: out
+      run: echo "image-uri=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+
+# ---------------- DEPLOY ----------------
+  deploy:
+    runs-on: ubuntu-latest
+    needs: docker-push
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: AWS login
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Make scripts executable
+      run: chmod +x infra/scripts/*.sh
+
+    - name: Detect slot
+      id: slot
+      run: bash infra/scripts/detect_slot.sh
+
+    - name: Register task
+      id: task
+      env:
+        IMAGE_URI: ${{ needs.docker-push.outputs.image-uri }}
+        ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      run: bash infra/scripts/register_task.sh
+
+    - name: Scale up
+      run: bash infra/scripts/scale_up.sh
+
+    - name: Health check
+      run: bash infra/scripts/health_check.sh
+
+    - name: Switch traffic
+      run: bash infra/scripts/switch_traffic.sh
+
+    - name: Validate rollback
+      run: bash infra/scripts/validate_and_rollback.sh
+
+    - name: Scale down old
+      if: success()
+      run: bash infra/scripts/scale_down.sh
+
+
+# ---------------- MONITOR ----------------
+  monitor:
+    runs-on: ubuntu-latest
+    needs: deploy
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: AWS login
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - run: bash infra/scripts/monitor_burnin.sh
+
+
+# ---------------- ROLLBACK ----------------
+  rollback:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: AWS login
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - run: bash infra/scripts/rollback.sh
