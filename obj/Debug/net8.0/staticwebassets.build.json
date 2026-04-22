@@ -1,0 +1,11 @@
+{
+  "Version": 1,
+  "Hash": "Va1muYShBKHI0ZPLL0NPXMUYBnBl8ym5eTkLvtfiYtg=",
+  "Source": "aspnet-api-app",
+  "BasePath": "_content/aspnet-api-app",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": []
+}
