@@ -6,10 +6,17 @@ set -euo pipefail
 
 echo "==> Registering new task definition..."
 
-# Load base task definition
-TASK_DEF_JSON=$(cat infra/terraform/task-definition.json)
+# ALWAYS use repo root safe path
+TASK_DEF_FILE="infra/terraform/task-definition.json"
 
-# Inject new image
+if [ ! -f "$TASK_DEF_FILE" ]; then
+  echo "❌ Task definition file not found at: $TASK_DEF_FILE"
+  ls -R infra || true
+  exit 1
+fi
+
+TASK_DEF_JSON=$(cat "$TASK_DEF_FILE")
+
 NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
   --arg IMAGE "$IMAGE_URI" \
   '.containerDefinitions[0].image = $IMAGE
@@ -23,7 +30,6 @@ NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq \
       .registeredBy
     )')
 
-# Register task definition
 TASK_DEF_ARN=$(aws ecs register-task-definition \
   --cli-input-json "$NEW_TASK_DEF" \
   --query "taskDefinition.taskDefinitionArn" \
@@ -33,5 +39,4 @@ TASK_DEF_ARN=$(aws ecs register-task-definition \
 echo "==> Registered task definition:"
 echo "$TASK_DEF_ARN"
 
-# Export for GitHub Actions
 echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
