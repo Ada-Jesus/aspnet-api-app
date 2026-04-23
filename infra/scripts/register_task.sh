@@ -3,36 +3,25 @@ set -euo pipefail
 
 : "${IMAGE_URI:?Missing IMAGE_URI}"
 : "${AWS_REGION:?Missing AWS_REGION}"
+: "${ECS_CLUSTER:?Missing ECS_CLUSTER}"
+: "${DEPLOY_SERVICE:?Missing DEPLOY_SERVICE}"
 
-echo "==> Registering ECS task definition..."
+echo "==> Updating ECS service with new image..."
 
-TASK_DEF_FILE="$(pwd)/infra/terraform/task-definition.json"
-
-if [ ! -f "$TASK_DEF_FILE" ]; then
-  echo "Task definition not found: $TASK_DEF_FILE"
-  exit 1
-fi
-
-TASK_JSON=$(cat "$TASK_DEF_FILE")
-
-NEW_TASK=$(echo "$TASK_JSON" | jq \
-  --arg IMAGE "$IMAGE_URI" \
-  '.containerDefinitions[0].image = $IMAGE
-  | del(
-      .taskDefinitionArn,
-      .revision,
-      .status,
-      .requiresAttributes,
-      .compatibilities,
-      .registeredAt,
-      .registeredBy
-    )')
-
-TASK_ARN=$(aws ecs register-task-definition \
-  --cli-input-json "$NEW_TASK" \
+TASK_DEF_ARN=$(aws ecs describe-task-definition \
+  --task-definition "$DEPLOY_SERVICE" \
   --query "taskDefinition.taskDefinitionArn" \
   --output text \
   --region "$AWS_REGION")
 
-echo "TASK_DEF_ARN=$TASK_ARN" >> $GITHUB_ENV
-echo "Registered: $TASK_ARN"
+echo "Using task definition: $TASK_DEF_ARN"
+
+echo "==> Updating service with force new deployment..."
+
+aws ecs update-service \
+  --cluster "$ECS_CLUSTER" \
+  --service "$DEPLOY_SERVICE" \
+  --force-new-deployment \
+  --region "$AWS_REGION"
+
+echo "DONE"
