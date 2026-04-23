@@ -46,9 +46,7 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+    - uses: actions/setup-dotnet@v4
       with:
         dotnet-version: '8.x'
 
@@ -75,10 +73,9 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Login to ECR
-      uses: aws-actions/amazon-ecr-login@v2
+    - uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Build & push image
+    - name: Build & push
       run: |
         docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
         docker push $ECR_REPOSITORY:$IMAGE_TAG
@@ -96,11 +93,9 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # ---------------- INSTALL TOOLS ----------------
     - name: Install jq
       run: sudo apt-get update && sudo apt-get install -y jq
 
-    # ---------------- AWS LOGIN ----------------
     - name: Configure AWS credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
@@ -108,7 +103,7 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # ---------------- SLOT DETECTION ----------------
+    # ---------------- DETECT SLOT ----------------
     - name: Detect slot
       id: slot
       env:
@@ -136,6 +131,7 @@ jobs:
         ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
         DESIRED_COUNT: ${{ vars.DESIRED_COUNT }}
         DEPLOY_SERVICE: ${{ steps.slot.outputs.deploy_service }}
+        TASK_DEF_ARN: ${{ steps.task.outputs.task_def_arn }}
         AWS_REGION: ${{ vars.AWS_REGION }}
       run: bash infra/scripts/scale_up.sh
 
@@ -145,11 +141,18 @@ jobs:
         ALB_DNS_NAME: ${{ vars.ALB_DNS_NAME }}
       run: bash infra/scripts/health_check.sh
 
+    # ---------------- SMOKE TEST ----------------
+    - name: Smoke test
+      env:
+        ALB_DNS_NAME: ${{ vars.ALB_DNS_NAME }}
+      run: bash infra/scripts/smoke_test.sh
+
     # ---------------- SWITCH TRAFFIC ----------------
     - name: Switch traffic
       env:
         ALB_LISTENER_ARN: ${{ vars.ALB_LISTENER_ARN }}
         AWS_REGION: ${{ vars.AWS_REGION }}
+        DEPLOY_TG_ARN: ${{ steps.slot.outputs.deploy_tg }}
       run: bash infra/scripts/switch_traffic.sh
 
     # ---------------- VALIDATE ----------------
@@ -157,6 +160,7 @@ jobs:
       env:
         ALB_DNS_NAME: ${{ vars.ALB_DNS_NAME }}
         AWS_REGION: ${{ vars.AWS_REGION }}
+        LIVE_TG: ${{ steps.slot.outputs.live_tg }}
       run: bash infra/scripts/validate_and_rollback.sh
 
     # ---------------- SCALE DOWN OLD ----------------
@@ -164,6 +168,7 @@ jobs:
       if: success()
       env:
         ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+        LIVE_SERVICE: ${{ steps.slot.outputs.live_service }}
         AWS_REGION: ${{ vars.AWS_REGION }}
       run: bash infra/scripts/scale_down.sh
 
