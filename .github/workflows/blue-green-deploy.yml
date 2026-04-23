@@ -103,13 +103,14 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    # 🔍 DEBUG STEP (CONFIRMS VARIABLE IS LOADED)
+    # DEBUG (can remove later)
     - name: Debug ALB variable
       run: |
         echo "ALB_LISTENER_ARN = '${{ vars.ALB_LISTENER_ARN }}'"
 
-    # 🔥 FIXED DETECT SLOT STEP
+    # ✅ FIXED DETECT SLOT
     - name: Detect slot
+      id: slot
       env:
         ALB_LISTENER_ARN: ${{ vars.ALB_LISTENER_ARN }}
         BLUE_TG_ARN: ${{ vars.BLUE_TG_ARN }}
@@ -121,16 +122,20 @@ jobs:
         echo "DEBUG ALB_LISTENER_ARN=$ALB_LISTENER_ARN"
         bash infra/scripts/detect_slot.sh
 
+    # ✅ FIXED REGISTER TASK
     - name: Register task
+      id: task
       env:
         IMAGE_URI: ${{ needs.docker-push.outputs.image-uri }}
         ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+        DEPLOY_SERVICE: ${{ steps.slot.outputs.deploy_service }}
         AWS_REGION: ${{ vars.AWS_REGION }}
       run: bash infra/scripts/register_task.sh
 
     - name: Scale up
       env:
         ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+        DEPLOY_SERVICE: ${{ steps.slot.outputs.deploy_service }}
         DESIRED_COUNT: ${{ vars.DESIRED_COUNT }}
         AWS_REGION: ${{ vars.AWS_REGION }}
       run: bash infra/scripts/scale_up.sh
@@ -143,6 +148,7 @@ jobs:
     - name: Switch traffic
       env:
         ALB_LISTENER_ARN: ${{ vars.ALB_LISTENER_ARN }}
+        DEPLOY_TG_ARN: ${{ steps.slot.outputs.deploy_tg }}
         AWS_REGION: ${{ vars.AWS_REGION }}
       run: bash infra/scripts/switch_traffic.sh
 
@@ -156,6 +162,7 @@ jobs:
       if: success()
       env:
         ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+        LIVE_SERVICE: ${{ steps.slot.outputs.live_service }}
         AWS_REGION: ${{ vars.AWS_REGION }}
       run: bash infra/scripts/scale_down.sh
 
