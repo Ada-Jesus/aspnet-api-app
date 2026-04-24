@@ -57,16 +57,17 @@ jobs:
 # ───────────────────────── BUILD ─────────────────────────
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.x"
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: "8.x"
 
-      - run: dotnet restore
-      - run: dotnet build -c Release --no-restore
-      - run: dotnet test -c Release --no-build
+    - run: dotnet restore
+    - run: dotnet build -c Release --no-restore
+    - run: dotnet test -c Release --no-build
 
 
 # ───────────────────────── DOCKER ─────────────────────────
@@ -78,32 +79,34 @@ jobs:
       image: ${{ steps.out.outputs.image }}
 
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
-        id: login
-        uses: aws-actions/amazon-ecr-login@v2
+    - uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build image
-        run: |
-          docker build -t $ECR_REPOSITORY:${{ github.run_number }} .
+    - name: Build image
+      run: |
+        docker build -t $ECR_REPOSITORY:${{ github.run_number }} .
 
-      - name: Tag + Push
-        id: out
-        run: |
-          IMAGE_URI=${{ steps.login.outputs.registry }}/$ECR_REPOSITORY:${{ github.run_number }}
+    - name: Push image
+      id: out
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        IMAGE_URI=$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:${{ github.run_number }}
 
-          docker tag $ECR_REPOSITORY:${{ github.run_number }} $IMAGE_URI
-          docker push $IMAGE_URI
+        docker tag $ECR_REPOSITORY:${{ github.run_number }} $IMAGE_URI
+        docker push $IMAGE_URI
 
-          echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+        echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+
+    # ✅ IMPORTANT FIX
+    - name: Export image globally
+      run: echo "IMAGE_URI=${{ steps.out.outputs.image }}" >> $GITHUB_ENV
 
 
 # ───────────────────────── DEPLOY ─────────────────────────
@@ -112,44 +115,42 @@ jobs:
     needs: docker
 
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      # ───────── FIXED SLOT DETECTION (STABLE) ─────────
-      - name: Detect slot (stable)
-        id: slot
-        run: |
-          BLUE=$(aws ecs describe-services \
-            --cluster $ECS_CLUSTER \
-            --services $BLUE_SERVICE \
-            --query "services[0].desiredCount" \
-            --output text)
+    # ───────────────────────── SLOT DETECTION ─────────────────────────
+    - name: Detect slot
+      id: slot
+      run: |
+        BLUE_COUNT=$(aws ecs describe-services \
+          --cluster $ECS_CLUSTER \
+          --services $BLUE_SERVICE \
+          --query "services[0].desiredCount" \
+          --output text)
 
-          GREEN=$(aws ecs describe-services \
-            --cluster $ECS_CLUSTER \
-            --services $GREEN_SERVICE \
-            --query "services[0].desiredCount" \
-            --output text)
+        if [ "$BLUE_COUNT" -gt 0 ]; then
+          echo "deploy=$GREEN_SERVICE" >> $GITHUB_OUTPUT
+          echo "live=$BLUE_SERVICE" >> $GITHUB_OUTPUT
+        else
+          echo "deploy=$BLUE_SERVICE" >> $GITHUB_OUTPUT
+          echo "live=$GREEN_SERVICE" >> $GITHUB_OUTPUT
+        fi
 
-          echo "Blue: $BLUE | Green: $GREEN"
+    # ───────────────────────── DEPLOY ─────────────────────────
+    - name: Deploy to ECS
+      run: bash infra/scripts/deploy.sh
+      env:
+        AWS_REGION: ${{ env.AWS_REGION }}
+        ECS_CLUSTER: ${{ env.ECS_CLUSTER }}
+        BLUE_SERVICE: ${{ env.BLUE_SERVICE }}
+        GREEN_SERVICE: ${{ env.GREEN_SERVICE }}
+        IMAGE_URI: ${{ env.IMAGE_URI }}
 
-          if [ "$BLUE" -gt 0 ]; then
-            echo "deploy=$GREEN_SERVICE" >> $GITHUB_OUTPUT
-          else
-            echo "deploy=$BLUE_SERVICE" >> $GITHUB_OUTPUT
-          fi
-
-      # ───────── DEPLOY TASK (FIXED) ─────────
-      - name: Deploy ECS service
-        run: |
-          aws ecs update-service \
-            --cluster $ECS_CLUSTER \
-            --service ${{ steps.slot.outputs.deploy }} \
-            --force-new-deployment \
-            --region $AWS_REGION
+        ALB_DNS_NAME: ${{ steps.alb.outputs.dns }}
+        ALB_LISTENER_ARN: ${{ steps.alb.outputs.listener }}
+        DEPLOY_TG_ARN: ${{ steps.alb.outputs.tg }}
