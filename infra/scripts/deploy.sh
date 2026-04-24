@@ -1,17 +1,31 @@
 #!/bin/bash
 set -euo pipefail
 
-: "${AWS_REGION:?Missing AWS_REGION}"
-: "${ECS_CLUSTER:?Missing ECS_CLUSTER}"
-: "${BLUE_SERVICE:?Missing BLUE_SERVICE}"
-: "${GREEN_SERVICE:?Missing GREEN_SERVICE}"
-: "${IMAGE_URI:?Missing IMAGE_URI}"
-
 echo "==> Starting stable blue/green deployment"
 
-# ───────────────────────────────
-# STEP 1: Detect active slot
-# ───────────────────────────────
+# ───────────────────────── SAFE CHECKS ─────────────────────────
+if [ -z "${IMAGE_URI:-}" ]; then
+  echo "ERROR: IMAGE_URI missing"
+  exit 1
+fi
+
+if [ -z "${ECS_CLUSTER:-}" ]; then
+  echo "ERROR: ECS_CLUSTER missing"
+  exit 1
+fi
+
+if [ -z "${BLUE_SERVICE:-}" ]; then
+  echo "ERROR: BLUE_SERVICE missing"
+  exit 1
+fi
+
+if [ -z "${GREEN_SERVICE:-}" ]; then
+  echo "ERROR: GREEN_SERVICE missing"
+  exit 1
+fi
+
+
+# ───────────────────────── DETECT SLOT ─────────────────────────
 BLUE_COUNT=$(aws ecs describe-services \
   --cluster "$ECS_CLUSTER" \
   --services "$BLUE_SERVICE" \
@@ -29,18 +43,17 @@ fi
 echo "Live: $LIVE"
 echo "Deploy: $DEPLOY"
 
-# ───────────────────────────────
-# STEP 2: Create new task definition
-# ───────────────────────────────
+
+# ───────────────────────── TASK DEF UPDATE ─────────────────────────
 TASK_DEF_ARN=$(aws ecs describe-task-definition \
   --task-definition aspnet-api-production \
   --query "taskDefinition.taskDefinitionArn" \
   --output text)
 
-RAW_TASK_DEF=$(aws ecs describe-task-definition \
+RAW=$(aws ecs describe-task-definition \
   --task-definition "$TASK_DEF_ARN")
 
-UPDATED_TASK_DEF=$(echo "$RAW_TASK_DEF" | jq \
+UPDATED=$(echo "$RAW" | jq \
   --arg IMAGE "$IMAGE_URI" \
   '.taskDefinition
   | .containerDefinitions[0].image = $IMAGE
@@ -55,73 +68,68 @@ UPDATED_TASK_DEF=$(echo "$RAW_TASK_DEF" | jq \
     )')
 
 NEW_TASK_DEF=$(aws ecs register-task-definition \
-  --cli-input-json "$UPDATED_TASK_DEF" \
+  --cli-input-json "$UPDATED" \
   --query "taskDefinition.taskDefinitionArn" \
   --output text)
 
-echo "New Task Def: $NEW_TASK_DEF"
+echo "Task Def: $NEW_TASK_DEF"
 
-# ───────────────────────────────
-# STEP 3: Deploy to standby slot
-# ───────────────────────────────
+
+# ───────────────────────── DEPLOY ─────────────────────────
 aws ecs update-service \
   --cluster "$ECS_CLUSTER" \
   --service "$DEPLOY" \
   --task-definition "$NEW_TASK_DEF" \
-  --desired-count "${DESIRED_COUNT:-1}" \
+  --desired-count 1 \
   --force-new-deployment \
-  --region "$AWS_REGION"
+  --region "${AWS_REGION:-us-east-1}"
 
 aws ecs wait services-stable \
   --cluster "$ECS_CLUSTER" \
   --services "$DEPLOY"
 
-# ───────────────────────────────
-# STEP 4: Health check
-# ───────────────────────────────
-ALB_DNS="${ALB_DNS_NAME:-}"
 
-if [ -z "$ALB_DNS" ]; then
-  echo "No ALB DNS → skipping health check"
-  exit 0
+# ───────────────────────── HEALTH CHECK ─────────────────────────
+ALB="${ALB_DNS_NAME:-}"
+
+if [ -z "$ALB" ]; then
+  echo "No ALB → skipping health check"
+else
+  URL="http://$ALB/health"
+
+  for i in {1..10}; do
+    CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
+
+    if [ "$CODE" = "200" ]; then
+      echo "Healthy"
+      break
+    fi
+
+    echo "Attempt $i failed ($CODE)"
+    sleep 5
+
+    if [ "$i" -eq 10 ]; then
+      echo "ROLLBACK TRIGGERED"
+      aws ecs update-service \
+        --cluster "$ECS_CLUSTER" \
+        --service "$DEPLOY" \
+        --desired-count 0
+      exit 1
+    fi
+  done
 fi
 
-URL="http://${ALB_DNS}/health"
 
-for i in {1..10}; do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$URL" || echo "000")
-
-  if [ "$CODE" = "200" ]; then
-    echo "Healthy"
-    break
-  fi
-
-  echo "Attempt $i failed ($CODE)"
-  sleep 5
-
-  if [ "$i" -eq 10 ]; then
-    echo "FAILED → rolling back"
-    aws ecs update-service \
-      --cluster "$ECS_CLUSTER" \
-      --service "$DEPLOY" \
-      --desired-count 0
-    exit 1
-  fi
-done
-
-# ───────────────────────────────
-# STEP 5: Switch traffic
-# ───────────────────────────────
+# ───────────────────────── TRAFFIC SWITCH ─────────────────────────
 aws elbv2 modify-listener \
   --listener-arn "$ALB_LISTENER_ARN" \
   --default-actions "Type=forward,TargetGroupArn=${DEPLOY_TG_ARN}"
 
-# ───────────────────────────────
-# STEP 6: Scale down old slot
-# ───────────────────────────────
+
+# ───────────────────────── SCALE DOWN OLD SLOT ─────────────────────────
 aws ecs update-service \
   --cluster "$ECS_CLUSTER" \
   --service "$LIVE" \
   --desired-count 0
 
-echo "Deployment complete"
+echo "==> Deployment complete"
