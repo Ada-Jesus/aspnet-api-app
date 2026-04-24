@@ -35,12 +35,11 @@
 # .github/workflows/blue-green-deploy.yml
 # FIXED: Stable Blue/Green ECS deployment pipeline
 # ══════════════════════════════════════
-name: ASP.NET API CI/CD - Blue/Green Deploy to AWS ECS Fargate
+name: 🚀 ASP.NET API CI/CD - Stable Blue/Green
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
   id-token: write
@@ -57,98 +56,101 @@ jobs:
 
 # ───────────────────────── BUILD ─────────────────────────
   build:
-    name: 🧪 Build & Test
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.x"
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: "8.x"
 
-      - run: dotnet restore
-      - run: dotnet build -c Release --no-restore
-      - run: dotnet test -c Release --no-build
+    - run: dotnet restore
+    - run: dotnet build -c Release --no-restore
+    - run: dotnet test -c Release --no-build
 
 
 # ───────────────────────── DOCKER ─────────────────────────
   docker:
-    name: 🐳 Build & Push
     runs-on: ubuntu-latest
     needs: build
 
+    outputs:
+      image: ${{ steps.out.outputs.image }}
+
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+    - uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build image
-        run: |
-          docker build -t $ECR_REPOSITORY:${{ github.run_number }} .
+    - name: Build image
+      run: |
+        docker build -t $ECR_REPOSITORY:${{ github.run_number }} .
 
-      - name: Tag image
-        run: |
-          docker tag $ECR_REPOSITORY:${{ github.run_number }} \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.run_number }}
+    - name: Tag + Push
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        IMAGE_URI=$ACCOUNT_ID.dkr.ecr.${AWS_REGION}.amazonaws.com/$ECR_REPOSITORY:${{ github.run_number }}
 
-      - name: Push image
-        run: |
-          docker push \
-          ${{ steps.login-ecr.outputs.registry }}/$ECR_REPOSITORY:${{ github.run_number }}
+        docker tag $ECR_REPOSITORY:${{ github.run_number }} $IMAGE_URI
+        docker push $IMAGE_URI
+
+        echo "image=$IMAGE_URI" >> $GITHUB_OUTPUT
+      id: out
 
 
 # ───────────────────────── DEPLOY ─────────────────────────
   deploy:
-    name: 🚀 Deploy to ECS
     runs-on: ubuntu-latest
     needs: docker
 
     steps:
-      - uses: actions/checkout@v4
+    - uses: actions/checkout@v4
 
-      - name: Configure AWS
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
 
-      # 🔥 STABLE SLOT DETECTION (NO JMESPATH BUGS)
-      - name: Detect slot
-        id: slot
-        run: |
-          BLUE_COUNT=$(aws ecs describe-services \
-            --cluster $ECS_CLUSTER \
-            --services $BLUE_SERVICE \
-            --query "services[0].desiredCount" \
-            --output text)
+    # ───────── FIXED SLOT DETECTION ─────────
+    - name: Detect slot
+      id: slot
+      run: |
+        RUNNING=$(aws ecs list-services \
+          --cluster $ECS_CLUSTER \
+          --query "serviceArns[]" \
+          --output text)
 
-          echo "Blue desired count: $BLUE_COUNT"
+        if aws ecs describe-services \
+          --cluster $ECS_CLUSTER \
+          --services $BLUE_SERVICE \
+          --query "services[0].runningCount" \
+          --output text | grep -q "^0$"; then
 
-          if [ "$BLUE_COUNT" -gt 0 ]; then
-            echo "deploy=$GREEN_SERVICE" >> $GITHUB_OUTPUT
-            echo "live=$BLUE_SERVICE" >> $GITHUB_OUTPUT
-          else
-            echo "deploy=$BLUE_SERVICE" >> $GITHUB_OUTPUT
-            echo "live=$GREEN_SERVICE" >> $GITHUB_OUTPUT
-          fi
+          echo "deploy=$BLUE_SERVICE" >> $GITHUB_OUTPUT
+        else
+          echo "deploy=$GREEN_SERVICE" >> $GITHUB_OUTPUT
+        fi
 
-      # 🔥 SIMPLE + STABLE DEPLOY
-      - name: Deploy to ECS
-        run: bash infra/scripts/deploy.sh
-        env:
-          AWS_REGION: ${{ env.AWS_REGION }}
-          ECS_CLUSTER: ${{ env.ECS_CLUSTER }}
-          DEPLOY_SERVICE: ${{ steps.slot.outputs.deploy }}
+    # ───────── DEPLOY (FIXED) ─────────
+    - name: Deploy to ECS
+      run: |
+        chmod +x infra/scripts/deploy.sh
+
+        export ECS_CLUSTER=$ECS_CLUSTER
+        export DEPLOY_SERVICE=${{ steps.slot.outputs.deploy }}
+
+        export TASK_DEF_ARN=$(aws ecs describe-task-definition \
+          --task-definition aspnet-api-production \
+          --query "taskDefinition.taskDefinitionArn" \
+          --output text)
+
+        export AWS_REGION=$AWS_REGION
+
+        bash infra/scripts/deploy.sh

@@ -1,35 +1,23 @@
 #!/bin/bash
 set -euo pipefail
 
-# ================= REQUIRED ENV =================
-: "${AWS_REGION:?Missing AWS_REGION}"
 : "${ECS_CLUSTER:?Missing ECS_CLUSTER}"
 : "${DEPLOY_SERVICE:?Missing DEPLOY_SERVICE}"
+: "${TASK_DEF_ARN:?Missing TASK_DEF_ARN}"
 
-echo "================================================"
-echo "🚀 ECS DEPLOYMENT START"
-echo "Cluster: $ECS_CLUSTER"
-echo "Service: $DEPLOY_SERVICE"
-echo "Region:  $AWS_REGION"
-echo "================================================"
-
-# ================= DEPLOY =================
-
-echo "==> Forcing new ECS deployment..."
+echo "==> Updating ECS service..."
 
 aws ecs update-service \
   --cluster "$ECS_CLUSTER" \
   --service "$DEPLOY_SERVICE" \
+  --task-definition "$TASK_DEF_ARN" \
   --force-new-deployment \
-  --region "$AWS_REGION"
+  --region "${AWS_REGION:-us-east-1}"
 
-echo "==> Waiting for service stability..."
+echo "==> Waiting for stability..."
 
 aws ecs wait services-stable \
   --cluster "$ECS_CLUSTER" \
-  --services "$DEPLOY_SERVICE" \
-  --region "$AWS_REGION"
+  --services "$DEPLOY_SERVICE"
 
-echo "================================================"
-echo "✅ DEPLOYMENT SUCCESSFUL"
-echo "================================================"
+echo "==> Deployment successful"
